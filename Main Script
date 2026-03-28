@@ -1,0 +1,228 @@
+from langgraph.graph import StateGraph, START, END
+from langchain_community.tools import DuckDuckGoSearchResults
+from typing import TypedDict, List, Literal
+from langchain_ollama import ChatOllama
+
+search_tool = DuckDuckGoSearchResults(output_format="list")
+print("Search Tool Ready")
+
+import markdown
+
+from fpdf import FPDF
+
+#############################################################
+
+def create_text_file(content, filename="linkedin_post.txt"):
+    # The 'utf-8' encoding is the magic word that saves emojis and Unicode bold safely
+    with open(filename, "w", encoding="utf-8") as file:
+        file.write(content)
+    return filename
+
+def create_html_file(markdown_text, filename="/kaggle/working/linkedin_post.html"):
+    # Convert the raw markdown (with **, #, etc.) into HTML tags
+    html_content = markdown.markdown(markdown_text)
+    
+    # Wrap it in a basic HTML structure so it looks like a real webpage
+    full_html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body {{ font-family: sans-serif; line-height: 1.6; padding: 40px; max-width: 800px; margin: auto; }}
+            h1, h2 {{ color: #0a66c2; }}
+        </style>
+    </head>
+    <body>
+        {html_content}
+    </body>
+    </html>
+    """
+    
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(full_html)
+    return filename
+
+#############################################################
+
+class AgentState(TypedDict):
+    topic: str
+    raw_content: List[str]
+    briefing: str
+    all_drafts: List[str]
+    final_posts: List[str]
+
+print("Loading DeepSeek Model")
+llm = ChatOllama(model="deepseek-r1:8b", temperature=0.7)
+print("State Defined and loaded model")
+
+#############################################################
+
+def scout_node(state: AgentState):
+
+    print("Searching for news")
+    query = f"Latest News and updates about {state['topic']}"
+    response = search_tool.invoke(query)
+    fake_news = "DeepSeek-R1 is the new open-source AI model that rivals OpenAI's o1."
+
+    results_to_return = []
+    
+    if len(response) > 0:
+        postNumber = 1
+        for i in response:
+            print("#" * 20)
+            found_post = { 'PostNumber' : postNumber, 'title': i['title'], 'source': i['link'], 'content': i['snippet']  }
+            print(f"Post {postNumber}:\nTitle: {i['title']}\nSnippet: {i['snippet']}\nSource: {i['link']}")
+            print("#" * 20)
+            postNumber += 1
+            results_to_return.append(found_post)
+
+    #print(results_to_return)
+    
+    print(f"Scout has found {response}")
+    return_result = {"raw_content": [response]}
+    return return_result
+
+#############################################################
+
+
+def route_news_status(State: AgentState) -> Literal["writer", "editor"]:
+
+    content = State.get("raw_content", [])
+
+    print(f"NEWS HAS RECEIVED: {content}")
+
+    if len(content) > 0:
+        print("Scout has succeeded")
+        return "editor"
+    else:
+        print("Scout has failed")
+        return "writer"
+        
+    
+
+#############################################################
+
+def editor_node(state : AgentState):
+    #print(state["raw_content"])
+    raw_text = '\n'.join(state["raw_content"])
+    topic = state["topic"]
+
+    prompt = f"""
+
+    You are a senior tech editor.
+    Here are search results about {topic}.
+    SEARCH RESULTS: 
+    {raw_text}
+
+    Your job is to; 
+    1) select single most interesting story from these.
+    2) Summarize it into "Briefing" for a linkedin content writer
+    3) Focus on techincal details and why it matters to the developers
+
+    Return only the Briefing.
+    """
+
+    print("Generating response")
+    response = llm.invoke(prompt)
+    print("Done editing")
+    return {"briefing": response.content}
+
+#############################################################
+
+def writer_node(state: AgentState):
+    briefing = state.get("briefing", "")
+
+    if not len(briefing) > 10:
+        return {"linkedin_post": "Failed to scout news"}
+
+    prompt = f"""
+    You are a Technical Content Creator for LinkedIn.
+    Your audience is developers and engineers.
+    
+    Topic Briefing:
+    {briefing}
+    
+    Your Task:
+    Write a LinkedIn post based on this briefing.
+    
+    Guidelines:
+    - Hook the reader in the first line.
+    - Use bullet points for key takeaways.
+    - Keep the tone professional but enthusiastic.
+    - Add relevant hashtags at the end.
+    - NO generic fluff ("In today's fast-paced world...").
+    
+    Return ONLY the post text.
+    """
+
+    print("Writer is writing")
+    response = llm.invoke(prompt)
+    print("Done Writing")
+    return {"linkedin_post": response.content}
+
+
+#############################################################
+
+def formatter_node(state: AgentState):
+    print("Converting to HTML...")
+    post_text = state["linkedin_post"]
+    
+    # We ask the AI for standard markdown
+    prompt = f"""
+        Make this post beautiful by following these rules:
+        1. Use standard Markdown **bold** for headings.
+        2. Use *italics* for emphasis or quotes.
+        3. Use bullet points ( - or * ) for lists.
+        4. Use horizontal rules ( --- ) to separate sections.
+        5. Use plenty of line breaks for readability.
+
+        Make sure the output is ONLY the Markdown text.
+
+        CONTENT:
+        {post_text}
+        """
+    
+    response = llm.invoke(prompt)
+    formatted_markdown = response.content
+    
+    # Create the HTML file
+    file_path = create_html_file(formatted_markdown)
+    print(f"✅ HTML file created at: {file_path}")
+    
+    return {"linkedin_post_formatted": formatted_markdown}
+
+#############################################################
+
+workflow = StateGraph(AgentState)
+
+workflow.add_node("scout", scout_node)
+workflow.add_node("editor", editor_node)
+workflow.add_node("writer", writer_node)
+workflow.add_node("formatter", formatter_node)
+
+workflow.add_edge(START, "scout")
+workflow.add_conditional_edges(
+    "scout", route_news_status, {"editor": "editor", "writer":"writer"}
+                             
+)
+workflow.add_edge("editor", "writer")
+workflow.add_edge("writer", "formatter")
+workflow.add_edge("formatter", END)
+
+app = workflow.compile()
+
+#############################################################
+
+input_topic = "Latest Roblox News"
+
+print(f"🚀 Starting the Crew on topic: '{input_topic}'...")
+
+# 2. Run the Graph
+final_state = app.invoke({"topic": input_topic})
+
+# 3. Print the Final Result
+print("\n" + "="*50)
+print("📝 FINAL LINKEDIN POST DRAFT:")
+print("="*50 + "\n")
+print(final_state["linkedin_post"])
