@@ -1,1 +1,2 @@
-It was a good learning experience working with this project, you basically give a topic, it searches for that topic, fetches the most recent news about it, then creates and beautifies it to create a post
+It was a good learning experience working with this project, you basically give a topic, it searches for that topic, fetches the most recent news about it, then creates and beautifies it to create a post.
+It uses LANGGRAPH, and duckduckgo search to fetch news.
